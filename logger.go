@@ -3,11 +3,14 @@ package traffic_logger
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/rs/zerolog"
-	"github.com/valyala/bytebufferpool"
 	"io/ioutil"
 	"net/http"
 	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/rs/zerolog"
+	"github.com/valyala/bytebufferpool"
 )
 
 type Options struct {
@@ -51,16 +54,9 @@ func (l *TrafficLogger) Handler(next http.Handler) http.Handler {
 		if !l.ignore.Req(apiName) {
 			reqBuffer = bytebufferpool.Get()
 			defer bytebufferpool.Put(reqBuffer)
-			n, err := reqBuffer.ReadFrom(r.Body)
-			if err != nil {
+			if err := l.getRequestBody(r, reqBuffer); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
-			}
-			_ = r.Body.Close()
-			if n > 0 {
-				r.Body = ioutil.NopCloser(bytes.NewReader(reqBuffer.B))
-			} else {
-				r.Body = &nullReadCloser{}
 			}
 		}
 
@@ -75,33 +71,91 @@ func (l *TrafficLogger) Handler(next http.Handler) http.Handler {
 		// wrap
 		next.ServeHTTP(nw, r)
 
-		// request log
-		logRequestEvent := zerolog.Dict().
-			Str("method", r.Method).
-			Str("host", l.extractor.Host(r)).
-			Str("path", r.URL.Path).
-			Str("query", r.URL.RawQuery)
-		if reqBuffer != nil {
-			logRequestEvent = logBodyEvent(logRequestEvent, reqBuffer.B)
-		}
-
-		// response log
-		logResponseEvent := zerolog.Dict().Int("status", nw.status)
-		if respBuffer != nil {
-			logResponseEvent = logBodyEvent(logResponseEvent, respBuffer.B)
-		}
-
-		// full log
-		l.logger.Log().
-			Int64("timestamp", reqStartTime.Unix()).
-			Str("api_name", apiName).
-			Str("ip", l.extractor.ClientIP(r)).
-			Str("operator", l.extractor.Operator(r)).
-			Dur("latency", time.Now().Sub(reqStartTime)).
-			Dict("request", logRequestEvent).
-			Dict("response", logResponseEvent).
-			Send()
+		l.performLogging(reqStartTime, apiName, r, nw.status, reqBuffer, respBuffer)
 	})
+}
+
+func (l *TrafficLogger) Gin() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// we don't track traffic without a api name
+		apiName := l.extractor.APIName(c.Request)
+		if len(apiName) == 0 {
+			c.Next()
+			return
+		}
+
+		// request time
+		reqStartTime := time.Now()
+
+		// get request body
+		var reqBuffer *bytebufferpool.ByteBuffer
+		if !l.ignore.Req(apiName) {
+			reqBuffer = bytebufferpool.Get()
+			defer bytebufferpool.Put(reqBuffer)
+			if err := l.getRequestBody(c.Request, reqBuffer); err != nil {
+				_ = c.AbortWithError(http.StatusInternalServerError, err)
+				return
+			}
+		}
+
+		// get resp
+		var respBuffer *bytebufferpool.ByteBuffer
+		if !l.ignore.Resp(apiName) {
+			respBuffer = bytebufferpool.Get()
+			defer bytebufferpool.Put(respBuffer)
+		}
+		nw := &recordableGinResponseWriter{ResponseWriter: c.Writer, buffer: respBuffer}
+
+		// wrap
+		c.Writer = nw
+		c.Next()
+
+		l.performLogging(reqStartTime, apiName, c.Request, nw.status, reqBuffer, respBuffer)
+	}
+}
+
+func (l *TrafficLogger) getRequestBody(r *http.Request, reqBuffer *bytebufferpool.ByteBuffer) error {
+	n, err := reqBuffer.ReadFrom(r.Body)
+	if err != nil {
+		return err
+	}
+	_ = r.Body.Close()
+	if n > 0 {
+		r.Body = ioutil.NopCloser(bytes.NewReader(reqBuffer.B))
+	} else {
+		r.Body = &nullReadCloser{}
+	}
+	return nil
+}
+
+func (l *TrafficLogger) performLogging(reqStartTime time.Time, apiName string,
+	r *http.Request, respStatus int, reqBuffer, respBuffer *bytebufferpool.ByteBuffer) {
+	// request log
+	logRequestEvent := zerolog.Dict().
+		Str("method", r.Method).
+		Str("host", l.extractor.Host(r)).
+		Str("path", r.URL.Path).
+		Str("query", r.URL.RawQuery)
+	if reqBuffer != nil {
+		logRequestEvent = logBodyEvent(logRequestEvent, reqBuffer.B)
+	}
+
+	// response log
+	logResponseEvent := zerolog.Dict().Int("status", respStatus)
+	if respBuffer != nil {
+		logResponseEvent = logBodyEvent(logResponseEvent, respBuffer.B)
+	}
+
+	// full log
+	l.logger.Log().
+		Int64("timestamp", reqStartTime.Unix()).
+		Str("api_name", apiName).
+		Str("ip", l.extractor.ClientIP(r)).
+		Str("operator", l.extractor.Operator(r)).
+		Dur("latency", time.Now().Sub(reqStartTime)).
+		Dict("request", logRequestEvent).
+		Dict("response", logResponseEvent).
+		Send()
 }
 
 func logBodyEvent(e *zerolog.Event, b []byte) *zerolog.Event {

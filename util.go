@@ -4,7 +4,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/gin-gonic/gin"
 	"github.com/valyala/bytebufferpool"
 )
 
@@ -32,25 +31,6 @@ func (r *recordableResponseWriter) WriteHeader(statusCode int) {
 }
 
 func (r *recordableResponseWriter) Write(p []byte) (int, error) {
-	if r.buffer != nil {
-		r.buffer.Write(p)
-	}
-	return r.ResponseWriter.Write(p)
-}
-
-// recordableGinResponseWriter 支持 response 记录的 response writer
-type recordableGinResponseWriter struct {
-	gin.ResponseWriter
-	buffer *bytebufferpool.ByteBuffer
-	status int
-}
-
-func (r *recordableGinResponseWriter) WriteHeader(statusCode int) {
-	r.status = statusCode
-	r.ResponseWriter.WriteHeader(statusCode)
-}
-
-func (r *recordableGinResponseWriter) Write(p []byte) (int, error) {
 	if r.buffer != nil {
 		r.buffer.Write(p)
 	}

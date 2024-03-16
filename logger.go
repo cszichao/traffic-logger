@@ -3,11 +3,9 @@ package traffic_logger
 import (
 	"bytes"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
-
-	"github.com/gin-gonic/gin"
 
 	"github.com/rs/zerolog"
 	"github.com/valyala/bytebufferpool"
@@ -39,7 +37,7 @@ func New(options *Options) *TrafficLogger {
 
 func (l *TrafficLogger) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// we don't track traffic without a api name
+		// we don't track traffic without api name
 		apiName := l.extractor.APIName(r)
 		if len(apiName) == 0 {
 			next.ServeHTTP(w, r)
@@ -75,45 +73,6 @@ func (l *TrafficLogger) Handler(next http.Handler) http.Handler {
 	})
 }
 
-func (l *TrafficLogger) Gin() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// we don't track traffic without a api name
-		apiName := l.extractor.APIName(c.Request)
-		if len(apiName) == 0 {
-			c.Next()
-			return
-		}
-
-		// request time
-		reqStartTime := time.Now()
-
-		// get request body
-		var reqBuffer *bytebufferpool.ByteBuffer
-		if !l.ignore.Req(apiName) {
-			reqBuffer = bytebufferpool.Get()
-			defer bytebufferpool.Put(reqBuffer)
-			if err := l.getRequestBody(c.Request, reqBuffer); err != nil {
-				_ = c.AbortWithError(http.StatusInternalServerError, err)
-				return
-			}
-		}
-
-		// get resp
-		var respBuffer *bytebufferpool.ByteBuffer
-		if !l.ignore.Resp(apiName) {
-			respBuffer = bytebufferpool.Get()
-			defer bytebufferpool.Put(respBuffer)
-		}
-		nw := &recordableGinResponseWriter{ResponseWriter: c.Writer, buffer: respBuffer}
-
-		// wrap
-		c.Writer = nw
-		c.Next()
-
-		l.performLogging(reqStartTime, apiName, c.Request, nw.status, reqBuffer, respBuffer)
-	}
-}
-
 func (l *TrafficLogger) getRequestBody(r *http.Request, reqBuffer *bytebufferpool.ByteBuffer) error {
 	n, err := reqBuffer.ReadFrom(r.Body)
 	if err != nil {
@@ -121,7 +80,7 @@ func (l *TrafficLogger) getRequestBody(r *http.Request, reqBuffer *bytebufferpoo
 	}
 	_ = r.Body.Close()
 	if n > 0 {
-		r.Body = ioutil.NopCloser(bytes.NewReader(reqBuffer.B))
+		r.Body = io.NopCloser(bytes.NewReader(reqBuffer.B))
 	} else {
 		r.Body = &nullReadCloser{}
 	}
